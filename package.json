@@ -1,0 +1,22 @@
+{
+  "name": "workshop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Effect.ts Telegram bot backend (Telegraf) that replies with static text",
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "dev": "bun --watch src/main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@langchain/core": "^0.3.0",
+    "effect": "^3.10.0",
+    "langchain": "^0.3.0",
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.0",
+    "typescript": "^5.6.0"
+  }
+}
