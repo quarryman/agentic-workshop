@@ -1,6 +1,12 @@
-import { Cause, Effect, Exit, Fiber } from "effect"
+import * as NodeFileSystem from "@effect/platform-node/NodeFileSystem"
+import * as NodePath from "@effect/platform-node/NodePath"
+import { Cause, Effect, Exit, Fiber, Layer } from "effect"
 import { TelegramBot } from "./bot.ts"
 import { ChatModel } from "./chat.ts"
+import { FsTools } from "./fstools.ts"
+
+/** Platform services (FileSystem + Path) required by the filesystem tools. */
+const PlatformLayer = Layer.merge(NodeFileSystem.layer, NodePath.layer)
 
 /**
  * The main program: build the TelegramBot service (which launches long-polling)
@@ -18,6 +24,8 @@ const program = Effect.gen(function* () {
 const runnable = program.pipe(
   Effect.provide(TelegramBot.Default),
   Effect.provide(ChatModel.Default),
+  Effect.provide(FsTools.Default),
+  Effect.provide(PlatformLayer),
   Effect.scoped,
   Effect.tapErrorCause((cause) =>
     Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError(cause)

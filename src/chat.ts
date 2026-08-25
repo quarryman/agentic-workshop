@@ -2,6 +2,7 @@ import { ChatGroq } from "@langchain/groq"
 import { createReactAgent } from "@langchain/langgraph/prebuilt"
 import { Data, Effect, Redacted } from "effect"
 import { groqApiKey, groqModel, SYSTEM_PROMPT } from "./config.ts"
+import { FsTools } from "./fstools.ts"
 
 /** Failure raised when the agent/LLM call errors. Never carries the API key. */
 export class ChatModelError extends Data.TaggedError("ChatModelError")<{
@@ -34,22 +35,28 @@ const extractText = (messages: ReadonlyArray<{ content: unknown }>): string => {
  * The language model as an Effect service.
  *
  * Constructs a Groq chat client from the configured (redacted) API key and
- * compiles a built-in LangChain agent loop (`createReactAgent`) with no tools.
- * Exposes `ask`, which runs the agent for a user message and returns the reply
- * text as an Effect. LangChain's Promise API is kept at this boundary.
+ * compiles a built-in LangChain agent loop (`createReactAgent`) with the
+ * sandboxed read-only filesystem tools. Exposes `ask`, which runs the agent
+ * for a user message and returns the reply text as an Effect. LangChain's
+ * Promise API is kept at this boundary.
  */
 export class ChatModel extends Effect.Service<ChatModel>()("ChatModel", {
   effect: Effect.gen(function* () {
     const key = yield* groqApiKey
     const model = yield* groqModel
+    const fsTools = yield* FsTools
 
     const llm = new ChatGroq({
       apiKey: Redacted.value(key),
       model,
     })
 
-    // Built-in agentic loop with no tools yet (single model turn until tools exist).
-    const agent = createReactAgent({ llm, tools: [], prompt: SYSTEM_PROMPT })
+    // Built-in agentic loop with the read-only filesystem tools (real tool calling).
+    const agent = createReactAgent({
+      llm,
+      tools: fsTools.tools,
+      prompt: SYSTEM_PROMPT,
+    })
 
     const ask = (message: string): Effect.Effect<string, ChatModelError> =>
       Effect.tryPromise({
