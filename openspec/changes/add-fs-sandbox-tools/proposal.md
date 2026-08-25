@@ -21,7 +21,8 @@ The agent currently runs a built-in loop with no tools, so it can only answer fr
 
 ## Impact
 
-- New Effect service/module exposing the filesystem tools to the LangChain agent (`tool()` definitions with schemas).
+- New Effect service/module exposing the filesystem tools to the LangChain agent (`tool()` definitions with schemas), with all reads performed through Effect's `@effect/platform` `FileSystem` service (Bun implementation) rather than raw `node:fs`.
+- New dependencies: `@effect/platform` and `@effect/platform-bun` (and `zod` if not already present).
 - Modifies the `ChatModel` agent construction to pass the toolset to `createReactAgent`.
 - New configuration: `SANDBOX_ROOT` environment variable (with default); documented in `.env.example`.
 - Requires a Groq model that supports tool/function calling (the current default already does).
