@@ -1,6 +1,6 @@
 import { FileSystem, Path } from "@effect/platform"
 import { tool } from "@langchain/core/tools"
-import { Effect, Runtime } from "effect"
+import { Cause, Clock, Effect, Exit, Option, Runtime } from "effect"
 import { z } from "zod"
 import {
   DEFAULT_HEAD_TAIL_LINES,
@@ -243,39 +243,83 @@ export class FsTools extends Effect.Service<FsTools>()("FsTools", {
       })
 
     // --- LangChain tool wrappers: run each Effect on the captured runtime,
-    //     converting failures (string or defect) into a plain text result. ---
+    //     converting failures (string or defect) into a plain text result,
+    //     with start/completion logging annotated per invocation. ---
 
-    const runText = <E>(eff: Effect.Effect<string, E>): Promise<string> =>
-      Runtime.runPromise(runtime)(
-        eff.pipe(
-          Effect.catchAll((e) => Effect.succeed(String(e))),
-          Effect.catchAllDefect((d) => Effect.succeed(`Error: ${String(d)}`))
+    const MAX_ARGS_LEN = 200
+    const safeArgs = (args: unknown): string => {
+      const s = JSON.stringify(args) ?? "{}"
+      return s.length > MAX_ARGS_LEN ? s.slice(0, MAX_ARGS_LEN) + "…" : s
+    }
+
+    const runTool = <E>(
+      name: string,
+      args: unknown,
+      eff: Effect.Effect<string, E>
+    ): Promise<string> => {
+      const program = Effect.gen(function* () {
+        yield* Effect.logInfo("tool.invoke")
+        const start = yield* Clock.currentTimeMillis
+        const exit = yield* Effect.exit(eff)
+        const durationMs = (yield* Clock.currentTimeMillis) - start
+
+        if (Exit.isSuccess(exit)) {
+          const result = exit.value
+          yield* Effect.logInfo("tool.done").pipe(
+            Effect.annotateLogs({
+              outcome: "success",
+              durationMs,
+              resultBytes: result.length,
+            })
+          )
+          return result
+        }
+
+        // Classify failure: string failures are sandbox/input rejections;
+        // anything else (PlatformError / defect) is an I/O error.
+        const failure = Cause.failureOption(exit.cause)
+        const outcome =
+          Option.isSome(failure) && typeof failure.value === "string"
+            ? "rejected"
+            : "error"
+        const reason = Option.isSome(failure)
+          ? String(failure.value)
+          : Cause.pretty(exit.cause)
+        const text =
+          outcome === "rejected" ? reason : `Error: ${reason}`
+
+        yield* Effect.logWarning("tool.failed").pipe(
+          Effect.annotateLogs({ outcome, durationMs, reason })
         )
-      )
+        return text
+      }).pipe(Effect.annotateLogs({ tool: name, args: safeArgs(args) }))
+
+      return Runtime.runPromise(runtime)(program)
+    }
 
     const tools = [
-      tool(async ({ path: p }) => runText(lsImpl(p)), {
+      tool(async (a) => runTool("ls", a, lsImpl(a.path)), {
         name: "ls",
         description:
           "List directory entries (type, size, name) within the sandbox. Path is optional and defaults to the sandbox root.",
         schema: z.object({ path: z.string().optional() }),
       }),
-      tool(async ({ path: p }) => runText(catImpl(p)), {
+      tool(async (a) => runTool("cat", a, catImpl(a.path)), {
         name: "cat",
         description: "Read the full text content of a file within the sandbox.",
         schema: z.object({ path: z.string() }),
       }),
-      tool(async ({ path: p, lines }) => runText(headTailImpl(p, lines ?? DEFAULT_HEAD_TAIL_LINES, "head")), {
+      tool(async (a) => runTool("head", a, headTailImpl(a.path, a.lines ?? DEFAULT_HEAD_TAIL_LINES, "head")), {
         name: "head",
         description: "Read the first N lines (default 20) of a file within the sandbox.",
         schema: z.object({ path: z.string(), lines: z.number().int().positive().optional() }),
       }),
-      tool(async ({ path: p, lines }) => runText(headTailImpl(p, lines ?? DEFAULT_HEAD_TAIL_LINES, "tail")), {
+      tool(async (a) => runTool("tail", a, headTailImpl(a.path, a.lines ?? DEFAULT_HEAD_TAIL_LINES, "tail")), {
         name: "tail",
         description: "Read the last N lines (default 20) of a file within the sandbox.",
         schema: z.object({ path: z.string(), lines: z.number().int().positive().optional() }),
       }),
-      tool(async ({ pattern, path: p, glob }) => runText(grepImpl(pattern, p, glob)), {
+      tool(async (a) => runTool("grep", a, grepImpl(a.pattern, a.path, a.glob)), {
         name: "grep",
         description:
           "Regex-search file contents under a path in the sandbox. Returns 'relpath:line: match' rows. Optional glob filters which file names are searched.",
@@ -285,13 +329,13 @@ export class FsTools extends Effect.Service<FsTools>()("FsTools", {
           glob: z.string().optional(),
         }),
       }),
-      tool(async ({ glob, path: p }) => runText(findImpl(glob, p)), {
+      tool(async (a) => runTool("find", a, findImpl(a.glob, a.path)), {
         name: "find",
         description:
           "Find files whose name matches a glob (e.g. '*.ts') under a path in the sandbox.",
         schema: z.object({ glob: z.string(), path: z.string().optional() }),
       }),
-      tool(async ({ path: p, depth }) => runText(treeImpl(p, depth)), {
+      tool(async (a) => runTool("tree", a, treeImpl(a.path, a.depth)), {
         name: "tree",
         description:
           "Show a depth-limited directory tree within the sandbox. Path and depth are optional.",
