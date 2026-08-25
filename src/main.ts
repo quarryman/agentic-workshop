@@ -1,23 +1,31 @@
 import { Cause, Effect, Exit, Fiber } from "effect"
-import { botToken } from "./config.ts"
-import { makeBot } from "./bot.ts"
+import { TelegramBot } from "./bot.ts"
+import { ChatModel } from "./chat.ts"
 
 /**
- * Compose the config + bot resource into a single runnable program.
- * The scope keeps the bot alive until the fiber is interrupted, at which point
- * the resource's release step stops the bot.
+ * The main program: build the TelegramBot service (which launches long-polling)
+ * and keep the process alive until interrupted. Effect.never holds the scope
+ * open so the bot keeps running; interrupting the fiber closes the scope and
+ * runs the service finalizer that stops the bot.
  */
-const program = Effect.scoped(
-  Effect.gen(function* () {
-    const token = yield* botToken
-    yield* makeBot(token)
-    yield* Effect.log("Bot started. Long-polling for updates...")
-    yield* Effect.never
-  })
+const program = Effect.gen(function* () {
+  yield* TelegramBot
+  yield* Effect.never
+})
+
+// Provide the service layer, scope the program, and report non-interruption
+// failures via Effect's logger (no console usage).
+const runnable = program.pipe(
+  Effect.provide(TelegramBot.Default),
+  Effect.provide(ChatModel.Default),
+  Effect.scoped,
+  Effect.tapErrorCause((cause) =>
+    Cause.isInterruptedOnly(cause) ? Effect.void : Effect.logError(cause)
+  )
 )
 
 // Run the program with the Effect runtime as the main entry point.
-const fiber = Effect.runFork(program)
+const fiber = Effect.runFork(runnable)
 
 // Graceful shutdown: interrupting the fiber closes the scope and stops the bot.
 const shutdown = () => {
@@ -27,11 +35,9 @@ process.once("SIGINT", shutdown)
 process.once("SIGTERM", shutdown)
 
 fiber.addObserver((exit) => {
-  if (Exit.isFailure(exit)) {
-    if (!Cause.isInterruptedOnly(exit.cause)) {
-      console.error(Cause.pretty(exit.cause))
-      process.exitCode = 1
-    }
+  if (Exit.isFailure(exit) && !Cause.isInterruptedOnly(exit.cause)) {
+    // Failure cause was already logged via Effect.logError; signal a non-zero exit.
+    process.exitCode = 1
   }
   process.exit()
 })

@@ -1,45 +1,61 @@
-import { Effect } from "effect"
+import { Effect, Runtime } from "effect"
 import { Telegraf } from "telegraf"
 import { message } from "telegraf/filters"
-import { STATIC_REPLY } from "./config.ts"
+import { ChatModel } from "./chat.ts"
+import { botToken } from "./config.ts"
+
+/** Reply sent when the model call fails, so long-polling never stops. */
+const FALLBACK_REPLY = "Sorry, I couldn't process that right now. Please try again."
 
 /**
- * Build a Telegraf bot as a scoped Effect resource.
+ * The Telegram bot as a scoped Effect service.
  *
- * - acquire: constructs the client, registers the text handler, and starts
- *   long-polling. Resolves once polling has started.
- * - release: stops the bot so the process can shut down gracefully.
+ * Building the service resolves the ChatModel dependency, constructs the
+ * Telegraf client from the configured token, registers a text-message handler
+ * that answers via the agent loop, starts long-polling in the background, and
+ * installs a scope finalizer that stops the bot when the scope closes.
  */
-export const makeBot = (token: string) =>
-  Effect.acquireRelease(
-    Effect.async<Telegraf, Error>((resume) => {
-      const bot = new Telegraf(token)
+export class TelegramBot extends Effect.Service<TelegramBot>()("TelegramBot", {
+  scoped: Effect.gen(function* () {
+    const token = yield* botToken
 
-      // Reply to any incoming text message in the originating chat.
-      // The handler is modelled as an Effect and executed via the runtime.
-      bot.on(message("text"), (ctx) =>
-        Effect.runPromise(
-          Effect.gen(function* () {
-            yield* Effect.promise(() => ctx.reply(STATIC_REPLY))
-            yield* Effect.log(`Replied "${STATIC_REPLY}" to chat ${ctx.chat.id}`)
-          })
-        )
+    // Acquire the language model service used to generate replies.
+    const chat = yield* ChatModel
+
+    // Capture the current Effect runtime so the Telegraf callback (which lives
+    // outside the Effect world) can execute Effect-based reply/logging logic.
+    const runtime = yield* Effect.runtime<never>()
+
+    const bot = new Telegraf(token)
+
+    // Reply to any incoming text message with the agent's answer. On failure,
+    // log via Effect.logError and send a graceful fallback so polling continues.
+    bot.on(message("text"), (ctx) =>
+      Runtime.runPromise(runtime)(
+        Effect.gen(function* () {
+          const text = ctx.message.text
+          const reply = yield* chat.ask(text).pipe(
+            Effect.tapError((error) => Effect.logError(error)),
+            Effect.catchAll(() => Effect.succeed(FALLBACK_REPLY))
+          )
+          yield* Effect.promise(() => ctx.reply(reply))
+          yield* Effect.log(`Replied to chat ${ctx.chat.id}`)
+        })
       )
+    )
 
-      let settled = false
-      const settle = (result: Effect.Effect<Telegraf, Error>) => {
-        if (settled) return
-        settled = true
-        resume(result)
-      }
+    // Stop the bot when the scope closes (graceful shutdown).
+    yield* Effect.addFinalizer(() => Effect.sync(() => bot.stop()))
 
-      // bot.launch() resolves only once the bot stops; the onLaunch callback
-      // fires as soon as long-polling has started, which is our readiness signal.
-      bot
-        .launch(() => settle(Effect.succeed(bot)))
-        .catch((error: unknown) =>
-          settle(Effect.fail(error instanceof Error ? error : new Error(String(error))))
-        )
-    }),
-    (bot) => Effect.sync(() => bot.stop("SIGTERM"))
-  )
+    // Start long-polling in the background; surface launch errors via the logger.
+    yield* Effect.sync(() => {
+      void bot.launch().catch((error: unknown) =>
+        Runtime.runFork(runtime)(Effect.logError(error))
+      )
+    })
+
+    yield* Effect.log("Bot started. Long-polling for updates...")
+
+    return { bot } as const
+  }),
+}) {}
